@@ -125,7 +125,21 @@ body {
 }
 .form-group textarea:focus { border-color: var(--primary); }
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.connect-footer { display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end; }
+/* ── Saved servers ── */
+.saved-servers { display: flex; flex-direction: column; gap: 6px; }
+.saved-server-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-radius: var(--radius);
+  border: 1px solid var(--border); cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.saved-server-item:hover { border-color: var(--primary); background: #eff6ff; }
+.saved-server-info { flex: 1; min-width: 0; }
+.saved-server-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.saved-server-url  { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.saved-server-del  { flex-shrink: 0; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; color: var(--muted); font-size: 14px; line-height: 1; }
+.saved-server-del:hover { background: #fee2e2; color: var(--error); }
 .connect-error { color: var(--error); font-size: 13px; margin-top: 10px; display: none; }
 .connect-error.show { display: block; }
 
@@ -443,6 +457,10 @@ body {
 <div id="connectOverlay">
   <div class="connect-card">
     <h2>连接 WebDAV 服务器</h2>
+    <div class="form-group" id="savedServersGroup" style="display:none">
+      <label>历史记录</label>
+      <div class="saved-servers" id="savedServersList"></div>
+    </div>
     <div class="form-group">
       <label>服务器地址</label>
       <input id="cfUrl" type="url" placeholder="https://example.com/dav/"/>
@@ -704,6 +722,66 @@ async function api(method, url, body) {
   return d;
 }
 
+// ── Saved servers ──────────────────────────────────────────────────────────
+function getSavedServers() {
+  try { return JSON.parse(localStorage.getItem('savedServers') || '[]'); } catch { return []; }
+}
+function saveServer(cfg) {
+  const servers = getSavedServers();
+  const idx = servers.findIndex(s => s.url === cfg.url && s.username === cfg.username);
+  const entry = { url: cfg.url, username: cfg.username, password: cfg.password,
+    max_concurrent: cfg.max_concurrent, download_url: cfg.download_url, hosts: cfg.hosts };
+  if (idx >= 0) servers.splice(idx, 1);
+  servers.unshift(entry);
+  localStorage.setItem('savedServers', JSON.stringify(servers.slice(0, 10)));
+  renderSavedServers();
+}
+function deleteSavedServer(idx) {
+  const servers = getSavedServers();
+  servers.splice(idx, 1);
+  localStorage.setItem('savedServers', JSON.stringify(servers));
+  renderSavedServers();
+}
+function fillConnectForm(s) {
+  $('cfUrl').value = s.url || '';
+  $('cfUser').value = s.username || '';
+  $('cfPass').value = s.password || '';
+  $('cfConcurrent').value = s.max_concurrent || 5;
+  $('cfDownloadUrl').value = s.download_url || '';
+  $('cfHosts').value = s.hosts || '';
+}
+function renderSavedServers() {
+  const servers = getSavedServers();
+  const group = $('savedServersGroup');
+  const list  = $('savedServersList');
+  if (!servers.length) { group.style.display = 'none'; return; }
+  group.style.display = '';
+  list.innerHTML = servers.map((s, i) => {
+    let host = s.url;
+    try { host = new URL(s.url).hostname; } catch {}
+    const label = s.username ? `${s.username}@${host}` : host;
+    return `<div class="saved-server-item" data-idx="${i}">
+      <div class="saved-server-info">
+        <div class="saved-server-name">${label}</div>
+        <div class="saved-server-url">${s.url}</div>
+      </div>
+      <div class="saved-server-del" data-del="${i}" title="删除">×</div>
+    </div>`;
+  }).join('');
+  list.querySelectorAll('.saved-server-item').forEach(el => {
+    el.addEventListener('click', e => {
+      if (e.target.dataset.del !== undefined) return;
+      fillConnectForm(getSavedServers()[+el.dataset.idx]);
+    });
+  });
+  list.querySelectorAll('.saved-server-del').forEach(el => {
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      deleteSavedServer(+el.dataset.del);
+    });
+  });
+}
+
 // ── Connection ─────────────────────────────────────────────────────────────
 function setConnected(cfg) {
   S.connected = true; S.config = cfg;
@@ -737,6 +815,7 @@ $('doConnectBtn').addEventListener('click', async () => {
   try {
     await api('POST', '/api/connect', { url, username: user, password: pass, max_concurrent: conc, download_url: dlUrl, hosts });
     localStorage.setItem('cfHosts', hosts);
+    saveServer({ url, username: user, password: pass, max_concurrent: conc, download_url: dlUrl, hosts });
     setConnected({ url, username: user, max_concurrent: conc, download_url: dlUrl, hosts });
   } catch (e) { showConnectError(e.message); }
   finally { $('connectBtnText').textContent = '连接'; $('doConnectBtn').disabled = false; }
@@ -1174,6 +1253,7 @@ function closePreview() {
 (async () => {
   if (S.saveDir) $('saveDir').value = S.saveDir;
   $('cfHosts').value = localStorage.getItem('cfHosts') || '';
+  renderSavedServers();
   try {
     const d = await api('GET', '/api/status');
     if (d.connected) setConnected(d.config);
