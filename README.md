@@ -8,21 +8,47 @@ WebDAV 文件浏览与批量下载工具，支持文件预览、多选下载、�
 
 ### 前提条件
 
-安装 **Python 3.11 或更高版本**（[点此下载](https://www.python.org/downloads/)）
+安装 **Python 3.12**（压缩包内已附带安装程序 `python-3.12.7-amd64.exe`，或[点此下载](https://www.python.org/downloads/)）
 
 安装时勾选 **"Add Python to PATH"**，否则后续步骤会报错。
 
 ### 启动方法
 
-双击项目目录里的 `start.bat`。
+双击项目目录里的 `start.bat`，脚本会自动完成：
 
-脚本会自动完成：
-1. 创建 Python 虚拟环境
-2. 安装所需依赖
-3. 启动后端服务
-4. 自动打开浏览器 `http://localhost:8765`
+1. 检测 / 安装 Python 3.12
+2. 创建 Python 虚拟环境
+3. 安装所需依赖
+4. 启动后端服务并自动打开浏览器 `http://localhost:8765`
 
 > 关闭命令行窗口即停止服务。
+
+---
+
+## macOS 本地运行
+
+### 前提条件
+
+需要 Python 3.10 或更高版本。未安装时可用 Homebrew 一行搞定：
+
+```bash
+brew install python@3.12
+```
+
+### 启动方法
+
+**首次运行**：右键点击 `start.command` → **打开**（macOS 对下载文件有安全拦截，右键开一次后即解除）
+
+之后直接**双击** `start.command` 即可，会自动打开终端并启动服务，浏览器自动跳转到 `http://localhost:8765`。
+
+也可以在终端手动运行：
+
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+> 关闭终端窗口即停止服务。
 
 ---
 
