@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from pathlib import Path
 from typing import List, Optional
 
@@ -20,6 +21,12 @@ app.mount('/static', StaticFiles(directory=str(STATIC_DIR)), name='static')
 
 _state: dict = {'client': None, 'manager': None, 'config': {}}
 
+_STATE_FILE = (
+    Path('/downloads') / '.webdav_tasks.json'
+    if Path('/downloads').is_dir()
+    else Path(__file__).parent.parent / 'downloads' / '.webdav_tasks.json'
+)
+
 
 # ── SPA ───────────────────────────────────────────────────────────────────────
 @app.get('/')
@@ -33,19 +40,16 @@ class ConnectRequest(BaseModel):
     username: str = ''
     password: str = ''
     max_concurrent: int = 5
-    download_url: str = ''   # optional separate host for file transfers
-    hosts: str = ''          # /etc/hosts-style overrides, applied process-wide
+    download_url: str = ''
+    hosts: str = ''
 
 
 @app.post('/api/connect')
 async def connect(req: ConnectRequest):
-    # Close previous manager if any
     old_mgr: Optional[DownloadManager] = _state['manager']
     if old_mgr:
         await old_mgr.close()
 
-    # Apply hosts overrides before the connection test so the test itself
-    # also uses the overridden DNS resolution.
     host_map = parse_hosts_text(req.hosts) if req.hosts.strip() else {}
     apply_hosts(host_map)
 
@@ -54,8 +58,15 @@ async def connect(req: ConnectRequest):
     if not ok:
         raise HTTPException(400, msg)
 
+    manager = DownloadManager(
+        client, req.max_concurrent,
+        state_file=_STATE_FILE,
+        server_url=req.url,
+    )
+    await manager.start()
+
     _state['client'] = client
-    _state['manager'] = DownloadManager(client, req.max_concurrent)
+    _state['manager'] = manager
     _state['config'] = {
         'url': req.url,
         'username': req.username,
@@ -177,6 +188,7 @@ async def proxy_file(path: str, request: Request):
 class DownloadRequest(BaseModel):
     files: List[dict]
     save_dir: str
+    group_name: str = ''
 
 
 @app.post('/api/downloads/start')
@@ -192,13 +204,21 @@ async def start_downloads(req: DownloadRequest):
             save_path.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             raise HTTPException(400, f'Cannot create directory: {exc}')
-    count = manager.add_tasks(req.files, req.save_dir)
-    return {'count': count}
+
+    group_id = str(uuid.uuid4())
+    group_name = req.group_name.strip() or (
+        req.files[0]['name'] if len(req.files) == 1 else f'{len(req.files)}个文件'
+    )
+    server_url = _state['config'].get('url', '')
+
+    count = manager.add_tasks_grouped(
+        req.files, req.save_dir, group_id, group_name, server_url
+    )
+    return {'count': count, 'group_id': group_id}
 
 
 @app.get('/api/downloads')
 async def get_downloads():
-    """Returns aggregate summary + currently-running tasks. Fast even with 10 000+ tasks."""
     manager: Optional[DownloadManager] = _state['manager']
     if not manager:
         return {
@@ -206,9 +226,41 @@ async def get_downloads():
             'running': 0, 'pending': 0,
             'total_bytes': 0, 'downloaded_bytes': 0,
             'speed': 0, 'eta_seconds': None,
-            'running_tasks': [],
         }
     return manager.get_summary()
+
+
+@app.get('/api/downloads/groups')
+async def list_groups(
+    status: Optional[str] = None,
+    page: int = 0,
+    limit: int = 20,
+):
+    manager: Optional[DownloadManager] = _state['manager']
+    if not manager:
+        return {'total': 0, 'page': 0, 'limit': limit, 'groups': []}
+    return manager.get_groups_page(status, page, limit)
+
+
+@app.get('/api/downloads/groups/{group_id}/tasks')
+async def get_group_tasks(
+    group_id: str,
+    page: int = 0,
+    limit: int = 100,
+):
+    manager: Optional[DownloadManager] = _state['manager']
+    if not manager:
+        return {'total': 0, 'page': 0, 'limit': limit, 'tasks': []}
+    return manager.get_group_tasks(group_id, page, limit)
+
+
+@app.delete('/api/downloads/groups/{group_id}')
+async def delete_group(group_id: str):
+    manager: Optional[DownloadManager] = _state['manager']
+    if not manager:
+        raise HTTPException(400, 'Not connected')
+    manager.remove_group(group_id)
+    return {'status': 'ok'}
 
 
 @app.get('/api/downloads/list')
@@ -217,7 +269,6 @@ async def list_downloads(
     page: int = 0,
     limit: int = 50,
 ):
-    """Paginated task list. Use status=error|done|cancelled|pending|running."""
     manager: Optional[DownloadManager] = _state['manager']
     if not manager:
         return {'total': 0, 'page': 0, 'limit': limit, 'tasks': []}

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import uuid
 import time
 from pathlib import Path
@@ -13,20 +14,27 @@ class DownloadTask:
     __slots__ = (
         'id', 'path', 'name', 'save_path', 'total_size',
         'downloaded', 'status', 'error', 'speed', 'retry_count', '_cancel',
+        'group_id', 'group_name', 'created_at', 'server_url',
     )
 
-    def __init__(self, task_id: str, path: str, name: str, save_path: str, total_size: int):
+    def __init__(self, task_id: str, path: str, name: str, save_path: str,
+                 total_size: int, group_id: str, group_name: str,
+                 created_at: float, server_url: str):
         self.id = task_id
         self.path = path
         self.name = name
         self.save_path = save_path
         self.total_size = total_size
         self.downloaded = 0
-        self.status = 'pending'   # pending / running / done / error / cancelled
+        self.status = 'pending'
         self.error = ''
-        self.speed = 0.0          # bytes/sec
+        self.speed = 0.0
         self.retry_count = 0
         self._cancel = False
+        self.group_id = group_id
+        self.group_name = group_name
+        self.created_at = created_at
+        self.server_url = server_url
 
     def to_dict(self) -> dict:
         progress = (
@@ -43,36 +51,106 @@ class DownloadTask:
             'speed': self.speed,
             'progress': progress,
             'retry_count': self.retry_count,
+            'group_id': self.group_id,
+            'group_name': self.group_name,
+            'created_at': self.created_at,
+        }
+
+
+class DownloadGroup:
+    __slots__ = ('id', 'name', 'server_url', 'save_dir', 'created_at', 'task_ids')
+
+    def __init__(self, group_id: str, name: str, server_url: str,
+                 save_dir: str, created_at: float):
+        self.id = group_id
+        self.name = name
+        self.server_url = server_url
+        self.save_dir = save_dir
+        self.created_at = created_at
+        self.task_ids: List[str] = []
+
+    def to_dict(self, tasks: Dict[str, 'DownloadTask']) -> dict:
+        total_files = len(self.task_ids)
+        done = error = running = pending = cancelled = 0
+        total_size = downloaded = speed = 0
+        for tid in self.task_ids:
+            t = tasks.get(tid)
+            if t is None:
+                continue
+            total_size += t.total_size
+            downloaded += t.downloaded
+            speed += t.speed
+            if t.status == 'done':          done += 1
+            elif t.status == 'error':       error += 1
+            elif t.status == 'running':     running += 1
+            elif t.status == 'pending':     pending += 1
+            elif t.status == 'cancelled':   cancelled += 1
+
+        if running:
+            status = 'running'
+        elif pending:
+            status = 'pending'
+        elif error and not done and not running and not pending:
+            status = 'error'
+        elif done == total_files and total_files > 0:
+            status = 'done'
+        elif error:
+            status = 'error'
+        else:
+            status = 'done'
+
+        progress = round(downloaded / total_size * 100, 1) if total_size > 0 else 0
+        return {
+            'id': self.id,
+            'name': self.name,
+            'server_url': self.server_url,
+            'save_dir': self.save_dir,
+            'created_at': self.created_at,
+            'total_files': total_files,
+            'done_files': done,
+            'error_files': error,
+            'running_files': running,
+            'pending_files': pending,
+            'cancelled_files': cancelled,
+            'total_size': total_size,
+            'downloaded': downloaded,
+            'progress': progress,
+            'speed': speed,
+            'status': status,
         }
 
 
 class DownloadManager:
     MAX_RETRIES = 3
-    SPEED_WINDOW = 5.0       # seconds for rolling-window global speed
+    SPEED_WINDOW = 5.0
 
     @staticmethod
     def _chunk_size(file_size: int) -> int:
-        """Larger chunks for larger files to reduce I/O overhead."""
-        if file_size > 500 * 1024 * 1024:  return 8 * 1024 * 1024   # >500 MB → 8 MB
-        if file_size > 100 * 1024 * 1024:  return 4 * 1024 * 1024   # >100 MB → 4 MB
-        if file_size >  10 * 1024 * 1024:  return 2 * 1024 * 1024   # > 10 MB → 2 MB
-        return 512 * 1024                                              # small   → 512 KB
+        if file_size > 500 * 1024 * 1024:  return 8 * 1024 * 1024
+        if file_size > 100 * 1024 * 1024:  return 4 * 1024 * 1024
+        if file_size >  10 * 1024 * 1024:  return 2 * 1024 * 1024
+        return 512 * 1024
 
-    def __init__(self, webdav_client, max_concurrent: int = 5):
+    def __init__(self, webdav_client, max_concurrent: int = 5,
+                 state_file: Optional[Path] = None, server_url: str = ''):
         self.client = webdav_client
         self.max_concurrent = max_concurrent
+        self._state_file = state_file
+        self._server_url = server_url
 
-        # Task registry (all tasks, all time)
         self._tasks: Dict[str, DownloadTask] = {}
-        self._task_order: List[str] = []       # insertion order for pagination
-        self._running_ids: Set[str] = set()    # ids with status=='running'
+        self._task_order: List[str] = []
+        self._running_ids: Set[str] = set()
 
-        # Queue & worker coroutines
+        self._groups: Dict[str, DownloadGroup] = {}
+        self._group_order: List[str] = []   # newest-first
+
         self._queue: asyncio.Queue = asyncio.Queue()
         self._workers: List[asyncio.Task] = []
         self._started = False
+        self._save_task: Optional[asyncio.Task] = None
+        self._dirty = False
 
-        # Shared HTTP client – reused across all downloads (connection-pool)
         self._http = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=15.0, read=120.0, write=None, pool=15.0),
             follow_redirects=True,
@@ -83,33 +161,46 @@ class DownloadManager:
             ),
         )
 
-        # Aggregate counters (O(1) update each event)
         self._total_bytes: int = 0
         self._downloaded_bytes: int = 0
         self._done_count: int = 0
         self._error_count: int = 0
         self._cancelled_count: int = 0
 
-        # Global speed: (monotonic_time, bytes_delta) samples
         self._speed_samples: Deque[Tuple[float, int]] = deque()
 
-    # ── Public API ──────────────────────────────────────────────────────────
+    # ── Lifecycle ────────────────────────────────────────────────────────────
+
+    async def start(self):
+        """Start workers, save loop, and restore persisted state."""
+        self._start_workers()
+        self._save_task = asyncio.create_task(self._save_loop())
+        await self.load_state()
 
     async def close(self):
-        """Shut down workers and the HTTP client."""
         self._started = False
+        if self._save_task:
+            self._save_task.cancel()
+            await asyncio.gather(self._save_task, return_exceptions=True)
+        if self._dirty:
+            await self._do_save()
         for w in self._workers:
             w.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
         await self._http.aclose()
 
-    def add_tasks(self, files: List[dict], save_dir: str) -> int:
-        if not self._started:
-            self._start_workers()
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def add_tasks_grouped(self, files: List[dict], save_dir: str,
+                          group_id: str, group_name: str, server_url: str) -> int:
+        grp = DownloadGroup(group_id, group_name, server_url, save_dir, time.time())
+        self._groups[group_id] = grp
+        self._group_order.insert(0, group_id)   # newest first
+
+        now = time.time()
         count = 0
         for f in files:
             tid = str(uuid.uuid4())
-            # save_as carries relative path (e.g. "folder/sub/file.txt") to preserve structure
             save_as = f.get('save_as') or f['name']
             task = DownloadTask(
                 task_id=tid,
@@ -117,13 +208,25 @@ class DownloadManager:
                 name=f['name'],
                 save_path=str(Path(save_dir) / save_as),
                 total_size=f.get('size', 0),
+                group_id=group_id,
+                group_name=group_name,
+                created_at=now,
+                server_url=server_url,
             )
             self._tasks[tid] = task
             self._task_order.append(tid)
+            grp.task_ids.append(tid)
             self._total_bytes += f.get('size', 0)
             self._queue.put_nowait(task)
             count += 1
+
+        self.mark_dirty()
         return count
+
+    def add_tasks(self, files: List[dict], save_dir: str) -> int:
+        gid = str(uuid.uuid4())
+        name = files[0]['name'] if len(files) == 1 else f'{len(files)}个文件'
+        return self.add_tasks_grouped(files, save_dir, gid, name, self._server_url)
 
     def cancel_task(self, task_id: str):
         task = self._tasks.get(task_id)
@@ -133,9 +236,17 @@ class DownloadManager:
         if task.status == 'pending':
             task.status = 'cancelled'
             self._cancelled_count += 1
-        # running tasks: the download loop detects _cancel on the next chunk
+            self.mark_dirty()
 
     def remove_task(self, task_id: str):
+        task = self._tasks.get(task_id)
+        if task:
+            grp = self._groups.get(task.group_id)
+            if grp:
+                try:
+                    grp.task_ids.remove(task_id)
+                except ValueError:
+                    pass
         self.cancel_task(task_id)
         self._tasks.pop(task_id, None)
         self._running_ids.discard(task_id)
@@ -143,6 +254,38 @@ class DownloadManager:
             self._task_order.remove(task_id)
         except ValueError:
             pass
+        self.mark_dirty()
+
+    def cancel_group(self, group_id: str):
+        grp = self._groups.get(group_id)
+        if not grp:
+            return
+        for tid in list(grp.task_ids):
+            self.cancel_task(tid)
+
+    def remove_group(self, group_id: str):
+        grp = self._groups.get(group_id)
+        if not grp:
+            return
+        for tid in list(grp.task_ids):
+            task = self._tasks.get(tid)
+            if task:
+                task._cancel = True
+                if task.status == 'pending':
+                    task.status = 'cancelled'
+                    self._cancelled_count += 1
+            self._tasks.pop(tid, None)
+            self._running_ids.discard(tid)
+            try:
+                self._task_order.remove(tid)
+            except ValueError:
+                pass
+        self._groups.pop(group_id, None)
+        try:
+            self._group_order.remove(group_id)
+        except ValueError:
+            pass
+        self.mark_dirty()
 
     def cancel_all_pending(self):
         for task in self._tasks.values():
@@ -150,14 +293,22 @@ class DownloadManager:
                 task._cancel = True
                 task.status = 'cancelled'
                 self._cancelled_count += 1
+        self.mark_dirty()
 
     def clear_finished(self):
-        """Remove done/error/cancelled tasks from memory to free RAM."""
         to_remove = [
             tid for tid, t in self._tasks.items()
             if t.status in ('done', 'error', 'cancelled')
         ]
         for tid in to_remove:
+            task = self._tasks.get(tid)
+            if task:
+                grp = self._groups.get(task.group_id)
+                if grp:
+                    try:
+                        grp.task_ids.remove(tid)
+                    except ValueError:
+                        pass
             self._tasks.pop(tid, None)
             self._running_ids.discard(tid)
             try:
@@ -165,8 +316,20 @@ class DownloadManager:
             except ValueError:
                 pass
 
+        # Remove groups whose tasks are all gone
+        empty = [
+            gid for gid, g in self._groups.items()
+            if not g.task_ids
+        ]
+        for gid in empty:
+            self._groups.pop(gid, None)
+            try:
+                self._group_order.remove(gid)
+            except ValueError:
+                pass
+        self.mark_dirty()
+
     def get_summary(self) -> dict:
-        """O(running_count) – safe to call every second even with 10 000+ tasks."""
         now = time.monotonic()
         cutoff = now - self.SPEED_WINDOW
         while self._speed_samples and self._speed_samples[0][0] < cutoff:
@@ -190,12 +353,6 @@ class DownloadManager:
             - self._cancelled_count - running, 0
         )
 
-        running_tasks = [
-            self._tasks[tid].to_dict()
-            for tid in list(self._running_ids)
-            if tid in self._tasks
-        ]
-
         return {
             'total': total,
             'done': self._done_count,
@@ -207,16 +364,9 @@ class DownloadManager:
             'downloaded_bytes': self._downloaded_bytes,
             'speed': speed,
             'eta_seconds': eta,
-            'running_tasks': running_tasks,
         }
 
-    def get_tasks_page(
-        self,
-        status: Optional[str],
-        page: int,
-        limit: int,
-    ) -> dict:
-        """Paginated task list for browsing error/done/all views."""
+    def get_tasks_page(self, status: Optional[str], page: int, limit: int) -> dict:
         if status:
             ids = [
                 tid for tid in self._task_order
@@ -233,7 +383,180 @@ class DownloadManager:
             'tasks': [self._tasks[tid].to_dict() for tid in slice_ids],
         }
 
-    # ── Workers ─────────────────────────────────────────────────────────────
+    def get_groups_page(self, status: Optional[str], page: int, limit: int) -> dict:
+        if status:
+            gids = [
+                gid for gid in self._group_order
+                if gid in self._groups
+                and self._groups[gid].to_dict(self._tasks)['status'] == status
+            ]
+        else:
+            gids = [gid for gid in self._group_order if gid in self._groups]
+        total = len(gids)
+        slice_ids = gids[page * limit: (page + 1) * limit]
+        return {
+            'total': total,
+            'page': page,
+            'limit': limit,
+            'groups': [self._groups[gid].to_dict(self._tasks) for gid in slice_ids],
+        }
+
+    def get_group_tasks(self, group_id: str, page: int, limit: int) -> dict:
+        grp = self._groups.get(group_id)
+        if not grp:
+            return {'total': 0, 'page': page, 'limit': limit, 'tasks': []}
+        ids = grp.task_ids
+        total = len(ids)
+        slice_ids = ids[page * limit: (page + 1) * limit]
+        return {
+            'total': total,
+            'page': page,
+            'limit': limit,
+            'tasks': [
+                self._tasks[tid].to_dict()
+                for tid in slice_ids
+                if tid in self._tasks
+            ],
+        }
+
+    # ── Persistence ───────────────────────────────────────────────────────────
+
+    def mark_dirty(self):
+        self._dirty = True
+
+    async def _save_loop(self):
+        while self._started:
+            await asyncio.sleep(2.0)
+            if self._dirty:
+                self._dirty = False
+                try:
+                    await self._do_save()
+                except Exception:
+                    pass
+
+    async def _do_save(self):
+        if not self._state_file:
+            return
+        try:
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_file.with_suffix('.tmp')
+            data = self._serialize_state()
+            async with aiofiles.open(tmp, 'w', encoding='utf-8') as fh:
+                await fh.write(json.dumps(data, ensure_ascii=False, indent=2))
+            tmp.replace(self._state_file)
+        except Exception:
+            pass
+
+    def _serialize_state(self) -> dict:
+        groups = []
+        for gid in self._group_order:
+            g = self._groups.get(gid)
+            if g:
+                groups.append({
+                    'id': g.id,
+                    'name': g.name,
+                    'server_url': g.server_url,
+                    'save_dir': g.save_dir,
+                    'created_at': g.created_at,
+                    'task_ids': list(g.task_ids),
+                })
+
+        tasks = []
+        for tid in self._task_order:
+            t = self._tasks.get(tid)
+            if t:
+                tasks.append({
+                    'id': t.id,
+                    'group_id': t.group_id,
+                    'group_name': t.group_name,
+                    'path': t.path,
+                    'name': t.name,
+                    'save_path': t.save_path,
+                    'total_size': t.total_size,
+                    'downloaded': t.downloaded,
+                    'status': t.status,
+                    'error': t.error,
+                    'retry_count': t.retry_count,
+                    'created_at': t.created_at,
+                    'server_url': t.server_url,
+                })
+
+        return {
+            'version': 1,
+            'saved_at': time.time(),
+            'groups': groups,
+            'tasks': tasks,
+        }
+
+    async def load_state(self):
+        if not self._state_file or not self._state_file.exists():
+            return
+        try:
+            async with aiofiles.open(self._state_file, encoding='utf-8') as fh:
+                raw = await fh.read()
+            data = json.loads(raw)
+        except Exception:
+            return
+
+        if data.get('version') != 1:
+            return
+
+        for gd in data.get('groups', []):
+            grp = DownloadGroup(
+                gd['id'], gd['name'], gd.get('server_url', ''),
+                gd.get('save_dir', ''), gd.get('created_at', 0),
+            )
+            grp.task_ids = []
+            self._groups[grp.id] = grp
+            self._group_order.append(grp.id)
+
+        for td in data.get('tasks', []):
+            tid = td['id']
+            t = DownloadTask(
+                task_id=tid,
+                path=td['path'],
+                name=td['name'],
+                save_path=td['save_path'],
+                total_size=td.get('total_size', 0),
+                group_id=td.get('group_id', ''),
+                group_name=td.get('group_name', ''),
+                created_at=td.get('created_at', 0),
+                server_url=td.get('server_url', ''),
+            )
+            t.downloaded = td.get('downloaded', 0)
+            t.error = td.get('error', '')
+            t.retry_count = td.get('retry_count', 0)
+
+            was_active = td['status'] in ('pending', 'running')
+            server_matches = (t.server_url == self._server_url)
+
+            if was_active and server_matches:
+                t.status = 'pending'
+                t._cancel = False
+                self._queue.put_nowait(t)
+            elif was_active and not server_matches:
+                t.status = 'error'
+                t.error = t.error or '[中断：服务器不匹配]'
+            else:
+                t.status = td['status']
+
+            self._tasks[tid] = t
+            self._task_order.append(tid)
+
+            grp = self._groups.get(t.group_id)
+            if grp and tid not in grp.task_ids:
+                grp.task_ids.append(tid)
+
+        self._recalculate_counters()
+
+    def _recalculate_counters(self):
+        self._total_bytes = sum(t.total_size for t in self._tasks.values())
+        self._downloaded_bytes = sum(t.downloaded for t in self._tasks.values())
+        self._done_count = sum(1 for t in self._tasks.values() if t.status == 'done')
+        self._error_count = sum(1 for t in self._tasks.values() if t.status == 'error')
+        self._cancelled_count = sum(1 for t in self._tasks.values() if t.status == 'cancelled')
+
+    # ── Workers ───────────────────────────────────────────────────────────────
 
     def _start_workers(self):
         self._started = True
@@ -264,19 +587,18 @@ class DownloadManager:
                 if task.status != 'cancelled':
                     task.status = 'cancelled'
                     self._cancelled_count += 1
+                    self.mark_dirty()
                 return
 
             if attempt > 0:
                 task.retry_count = attempt
-                await asyncio.sleep(min(2 ** attempt, 30))  # exponential back-off
+                await asyncio.sleep(min(2 ** attempt, 30))
 
             await self._do_download(task)
 
             if task.status in ('done', 'cancelled'):
                 return
-            # status == 'error' → retry unless last attempt
 
-        # All retries exhausted
         self._error_count += 1
 
     async def _do_download(self, task: DownloadTask):
@@ -306,13 +628,11 @@ class DownloadManager:
                 'GET', url, auth=auth, headers=req_headers
             ) as resp:
                 if resp.status_code == 200 and existing > 0:
-                    # Server doesn't support Range → restart
                     write_mode = 'wb'
                     task.downloaded = 0
                 elif resp.status_code not in (200, 206):
                     raise RuntimeError(f'HTTP {resp.status_code}')
 
-                # Resolve unknown total size from response headers
                 if task.total_size == 0:
                     cr = resp.headers.get('content-range', '')
                     if '/' in cr:
@@ -331,6 +651,7 @@ class DownloadManager:
                         if task._cancel:
                             task.status = 'cancelled'
                             self._cancelled_count += 1
+                            self.mark_dirty()
                             return
 
                         await fh.write(chunk)
@@ -339,11 +660,8 @@ class DownloadManager:
                         self._downloaded_bytes += n
 
                         now = time.monotonic()
-
-                        # Global speed sample
                         self._speed_samples.append((now, n))
 
-                        # Per-task speed (3-second rolling window)
                         task_speed_win.append((now, n))
                         while task_speed_win and task_speed_win[0][0] < now - 3.0:
                             task_speed_win.popleft()
@@ -354,13 +672,16 @@ class DownloadManager:
 
             task.status = 'done'
             self._done_count += 1
+            self.mark_dirty()
 
         except asyncio.CancelledError:
             task.status = 'cancelled'
             self._cancelled_count += 1
+            self.mark_dirty()
         except Exception as exc:
             task.status = 'error'
             task.error = str(exc)
+            self.mark_dirty()
         finally:
             task.speed = 0.0
             self._running_ids.discard(task.id)

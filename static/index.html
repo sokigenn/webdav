@@ -360,6 +360,36 @@ body {
 .dl-status.cancelled { background: #f1f5f9; color: var(--muted); }
 .dl-status.retrying { background: #fef9c3; color: var(--warning); }
 
+/* ── Download group rows ── */
+.dl-group { border-bottom: 1px solid var(--border); }
+.dl-group:last-child { border-bottom: none; }
+.dl-group-header {
+  display: grid;
+  grid-template-columns: 18px 1fr 60px 80px auto;
+  gap: 8px; align-items: center;
+  padding: 8px 12px 8px 10px;
+  cursor: pointer; transition: background .1s;
+}
+.dl-group-header:hover { background: #f8fafc; }
+.dl-expand-icon {
+  font-size: 10px; color: var(--muted); flex-shrink: 0;
+  transition: transform .2s; display: inline-block; line-height: 1;
+}
+.dl-group.expanded .dl-expand-icon { transform: rotate(90deg); }
+.dl-group-body { display: none; background: #f8fafc; border-top: 1px solid var(--border); }
+.dl-group.expanded .dl-group-body { display: block; }
+.dl-file-row {
+  display: grid;
+  grid-template-columns: 1fr 52px 72px auto;
+  gap: 6px; align-items: center;
+  padding: 5px 10px 5px 28px;
+  border-bottom: 1px solid var(--border);
+}
+.dl-file-row:last-child { border-bottom: none; }
+.dl-file-row .dl-name { font-size: 12px; font-weight: 400; }
+.dl-file-row .dl-pct { font-size: 11px; font-weight: 600; text-align: right; color: var(--muted); }
+.dl-file-row .dl-status { font-size: 10px; }
+
 /* Pagination */
 .pagination {
   display: flex; align-items: center; gap: 10px;
@@ -650,7 +680,12 @@ const S = {
   listTotal: 0,
   listLimit: 50,
   pollTimer: null,
+  groupsTimer: null,
   lastSummary: null,
+  lastGroupsData: null,
+  expandedGroups: new Set(),
+  groupTasks: {},
+  groupsPage: 0,
   sortField: 'name',
   sortDir: 1,
 };
@@ -1026,7 +1061,16 @@ $('downloadBtn').addEventListener('click', async () => {
   const selected = [...S.selected].map(p => fmap[p]).filter(Boolean);
   if (!selected.length) return;
 
-  const hasDirs = selected.some(f => f.is_dir);
+  // Compute group name before expanding (dirs get their folder name)
+  const dirs  = selected.filter(f => f.is_dir);
+  const files = selected.filter(f => !f.is_dir);
+  let groupName;
+  if (selected.length === 1 && dirs.length === 1)   groupName = dirs[0].name;
+  else if (selected.length === 1 && files.length === 1) groupName = files[0].name;
+  else if (files.length === 0)  groupName = `${dirs.length}个文件夹`;
+  else                          groupName = `${selected.length}个文件`;
+
+  const hasDirs = dirs.length > 0;
   if (hasDirs) showToast('正在展开目录…', 'info');
 
   let toDownload;
@@ -1041,6 +1085,7 @@ $('downloadBtn').addEventListener('click', async () => {
     const r = await api('POST', '/api/downloads/start', {
       files: toDownload.map(f => ({ path: f.path, name: f.name, size: f.size, save_as: f.save_as })),
       save_dir: S.saveDir,
+      group_name: groupName,
     });
     showToast(`已加入队列：${r.count} 个文件`, 'success');
     S.selected.clear(); renderFiles(S.files); updateSelectionUI();
@@ -1068,27 +1113,151 @@ $('pillError').addEventListener('click', () => switchTab('error'));
 
 function switchTab(tab) {
   S.activeTab = tab;
-  S.listPage = 0;
+  S.groupsPage = 0;
   $('panelHeader').querySelectorAll('.panel-tab').forEach(el => {
     el.classList.toggle('active', el.dataset.tab === tab);
   });
-  if (tab === 'running') {
-    // Rendered from summary poll, nothing to fetch
-    if (S.lastSummary) renderRunningTasks(S.lastSummary.running_tasks || []);
+  refreshGroupsPanel();
+}
+
+// ── Groups panel ───────────────────────────────────────────────────────────
+async function refreshGroupsPanel() {
+  try {
+    const d = await api('GET', `/api/downloads/groups?page=${S.groupsPage}&limit=20`);
+    S.lastGroupsData = d;
+
+    // Refresh tasks for expanded groups
+    const fetches = [...S.expandedGroups].map(async gid => {
+      try {
+        const td = await api('GET', `/api/downloads/groups/${gid}/tasks?page=0&limit=200`);
+        S.groupTasks[gid] = td.tasks;
+      } catch {}
+    });
+    await Promise.all(fetches);
+
+    renderGroups(d.groups, d.total);
+  } catch {}
+}
+
+function renderGroups(groups, total) {
+  const list = $('downloadList');
+
+  // Client-side tab filter
+  let filtered = groups;
+  if (S.activeTab === 'running') {
+    filtered = groups.filter(g => g.status === 'running' || g.status === 'pending');
+  } else if (S.activeTab === 'error') {
+    filtered = groups.filter(g => g.status === 'error');
+  } else if (S.activeTab === 'done') {
+    filtered = groups.filter(g => g.status === 'done' || g.status === 'cancelled');
+  }
+
+  if (!filtered.length) {
+    list.innerHTML = '<div class="dl-empty">暂无记录</div>';
     $('pagination').classList.add('hidden');
+    return;
+  }
+
+  list.innerHTML = filtered.map(g => buildGroupRow(g, S.groupTasks[g.id] || [])).join('');
+
+  list.querySelectorAll('.dl-group-header').forEach(el => {
+    el.addEventListener('click', e => {
+      if (e.target.closest('.cancel-group-btn')) return;
+      toggleGroup(el.closest('.dl-group').dataset.gid);
+    });
+  });
+  list.querySelectorAll('.cancel-group-btn').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      try { await api('DELETE', `/api/downloads/groups/${btn.dataset.gid}`); refreshGroupsPanel(); }
+      catch (err) { showToast('操作失败: ' + err.message, 'error'); }
+    });
+  });
+  list.querySelectorAll('.cancel-btn,.remove-btn').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      try { await api('DELETE', `/api/downloads/${btn.dataset.id}`); }
+      catch (err) { showToast('操作失败: ' + err.message, 'error'); }
+    });
+  });
+
+  const totalPages = Math.ceil(total / 20);
+  if (totalPages > 1) {
+    $('pagination').classList.remove('hidden');
+    $('pageInfo').textContent = `第 ${S.groupsPage + 1} / ${totalPages} 页`;
+    $('prevPageBtn').disabled = S.groupsPage === 0;
+    $('nextPageBtn').disabled = S.groupsPage >= totalPages - 1;
   } else {
-    loadTabPage(tab, 0);
+    $('pagination').classList.add('hidden');
   }
 }
 
-async function loadTabPage(status, page) {
-  S.listPage = page;
-  const statusParam = status === 'all' ? '' : status;
-  try {
-    const d = await api('GET', `/api/downloads/list?${statusParam?'status='+statusParam+'&':''}page=${page}&limit=${S.listLimit}`);
-    S.listTotal = d.total;
-    renderTaskList(d.tasks, d.total, page);
-  } catch {}
+function buildGroupRow(g, tasks) {
+  const isExpanded = S.expandedGroups.has(g.id);
+  const barCls = g.status === 'done' ? 'done' : g.status === 'error' ? 'error' : '';
+  const statusLabel = {running:'下载中', pending:'等待中', done:'完成', error:'失败', cancelled:'已取消'}[g.status] || g.status;
+  const fileInfo = `${g.done_files}/${g.total_files} 文件`;
+  const sizeStr = g.total_size > 0 ? `${fmtSize(g.downloaded)} / ${fmtSize(g.total_size)}` : fmtSize(g.downloaded);
+  const speedStr = (g.status === 'running' && g.speed > 100) ? fmtSpeed(g.speed) : '';
+  const canCancel = g.status === 'running' || g.status === 'pending';
+  const errorInfo = g.error_files > 0 ? `<span style="color:var(--error);font-size:11px;margin-left:6px">✗${g.error_files}</span>` : '';
+
+  const fileRows = isExpanded && tasks.length
+    ? tasks.map(t => buildFileRow(t)).join('')
+    : '';
+
+  return `<div class="dl-group${isExpanded ? ' expanded' : ''}" data-gid="${escHtml(g.id)}">
+    <div class="dl-group-header">
+      <span class="dl-expand-icon">▶</span>
+      <div class="dl-info">
+        <div class="dl-name" title="${escHtml(g.name)}">${escHtml(g.name)}<span style="color:var(--muted);font-size:11px;font-weight:400;margin-left:6px">${fileInfo}</span>${errorInfo}</div>
+        <div class="dl-bar-bg"><div class="dl-bar-fill ${barCls}" style="width:${g.progress}%"></div></div>
+        <div class="dl-sub">${escHtml(sizeStr)}</div>
+      </div>
+      <div class="dl-pct">${g.progress}%</div>
+      <div class="dl-speed">${escHtml(speedStr)}</div>
+      <button class="cancel-group-btn btn btn-ghost btn-icon btn-sm" data-gid="${escHtml(g.id)}" title="${canCancel ? '取消' : '移除'}">${canCancel ? '✕' : '🗑'}</button>
+    </div>
+    <div class="dl-group-body"><div>${fileRows}</div></div>
+  </div>`;
+}
+
+function buildFileRow(t) {
+  const pct = t.progress;
+  const barCls = t.status === 'done' ? 'done' : t.status === 'error' ? 'error' : t.status === 'cancelled' ? 'cancelled' : '';
+  const statusLabel = {running:'下载中', pending:'等待', done:'✓', error:'✗', cancelled:'取消'}[t.status] || t.status;
+  const sizeStr = t.total_size > 0 ? `${fmtSize(t.downloaded)} / ${fmtSize(t.total_size)}` : fmtSize(t.downloaded);
+  const canCancel = t.status === 'running' || t.status === 'pending';
+  const errTip = t.status === 'error' && t.error ? ` title="${escHtml(t.error)}"` : '';
+  return `<div class="dl-file-row">
+    <div class="dl-info">
+      <div class="dl-name" title="${escHtml(t.name)}">${escHtml(t.name)}</div>
+      <div class="dl-bar-bg"><div class="dl-bar-fill ${barCls}" style="width:${pct}%"></div></div>
+      <div class="dl-sub"${errTip}>${t.status === 'error' ? escHtml((t.error||'错误').slice(0,40)) : escHtml(sizeStr)}</div>
+    </div>
+    <div class="dl-pct">${pct}%</div>
+    <span class="dl-status ${t.status}">${statusLabel}</span>
+    <button class="${canCancel ? 'cancel-btn' : 'remove-btn'} btn btn-ghost btn-icon btn-sm" data-id="${t.id}" title="${canCancel ? '取消' : '移除'}">${canCancel ? '✕' : '🗑'}</button>
+  </div>`;
+}
+
+function toggleGroup(gid) {
+  if (S.expandedGroups.has(gid)) {
+    S.expandedGroups.delete(gid);
+    delete S.groupTasks[gid];
+    const el = $('downloadList').querySelector(`[data-gid="${CSS.escape(gid)}"]`);
+    if (el) el.classList.remove('expanded');
+  } else {
+    S.expandedGroups.add(gid);
+    api('GET', `/api/downloads/groups/${gid}/tasks?page=0&limit=200`)
+      .then(d => {
+        S.groupTasks[gid] = d.tasks;
+        if (S.lastGroupsData) renderGroups(S.lastGroupsData.groups, S.lastGroupsData.total);
+      })
+      .catch(() => {});
+    const el = $('downloadList').querySelector(`[data-gid="${CSS.escape(gid)}"]`);
+    if (el) el.classList.add('expanded');
+  }
 }
 
 // ── Polling ────────────────────────────────────────────────────────────────
@@ -1099,11 +1268,14 @@ function startPoll() {
       const d = await api('GET', '/api/downloads');
       S.lastSummary = d;
       renderStats(d);
-      if (S.activeTab === 'running') renderRunningTasks(d.running_tasks || []);
     } catch {}
   }, 1000);
+  S.groupsTimer = setInterval(() => refreshGroupsPanel(), 1500);
 }
-function stopPoll() { if (S.pollTimer) { clearInterval(S.pollTimer); S.pollTimer = null; } }
+function stopPoll() {
+  if (S.pollTimer)   { clearInterval(S.pollTimer);   S.pollTimer = null; }
+  if (S.groupsTimer) { clearInterval(S.groupsTimer); S.groupsTimer = null; }
+}
 
 // ── Stats render ───────────────────────────────────────────────────────────
 function renderStats(d) {
@@ -1139,79 +1311,14 @@ function renderStats(d) {
   $('tabCntDone').textContent = fmtNum(d.done);
 }
 
-// ── Running tasks render ───────────────────────────────────────────────────
-function renderRunningTasks(tasks) {
-  if (!tasks.length) {
-    $('downloadList').innerHTML = '<div class="dl-empty">暂无下载中的任务</div>';
-    $('pagination').classList.add('hidden');
-    return;
-  }
-  $('downloadList').innerHTML = tasks.map(t => buildTaskRow(t)).join('');
-  $('pagination').classList.add('hidden');
-  bindCancelBtns();
-}
-
-// ── Paginated task list render ─────────────────────────────────────────────
-function renderTaskList(tasks, total, page) {
-  if (!tasks.length) {
-    $('downloadList').innerHTML = '<div class="dl-empty">暂无记录</div>';
-    $('pagination').classList.add('hidden');
-    return;
-  }
-  $('downloadList').innerHTML = tasks.map(t => buildTaskRow(t)).join('');
-  bindCancelBtns();
-
-  const totalPages = Math.ceil(total / S.listLimit);
-  if (totalPages > 1) {
-    $('pagination').classList.remove('hidden');
-    $('pageInfo').textContent = `第 ${page+1} / ${totalPages} 页（共 ${fmtNum(total)} 条）`;
-    $('prevPageBtn').disabled = page === 0;
-    $('nextPageBtn').disabled = page >= totalPages - 1;
-  } else {
-    $('pagination').classList.add('hidden');
-  }
-}
-
-$('prevPageBtn').addEventListener('click', () => { if (S.listPage > 0) loadTabPage(S.activeTab, S.listPage - 1); });
-$('nextPageBtn').addEventListener('click', () => {
-  const total = S.listTotal;
-  if ((S.listPage + 1) * S.listLimit < total) loadTabPage(S.activeTab, S.listPage + 1);
+$('prevPageBtn').addEventListener('click', () => {
+  if (S.groupsPage > 0) { S.groupsPage--; refreshGroupsPanel(); }
 });
-
-function buildTaskRow(t) {
-  const pct = t.progress;
-  const barCls = t.status === 'done' ? 'done' : t.status === 'error' ? 'error' : t.status === 'cancelled' ? 'cancelled' : '';
-  const statusLabel = {running:'下载中', pending:'等待中', done:'完成', error:'失败', cancelled:'已取消', retrying:'重试中'}[t.status] || t.status;
-  const speedStr = t.status === 'running' && t.speed > 100 ? fmtSpeed(t.speed) : '';
-  const sizeStr = t.status === 'done' ? fmtSize(t.total_size)
-    : t.status === 'error' ? (t.error || '错误').slice(0, 40)
-    : t.total_size > 0 ? `${fmtSize(t.downloaded)} / ${fmtSize(t.total_size)}` : fmtSize(t.downloaded);
-  const retry = t.retry_count > 0 ? ` 重试${t.retry_count}` : '';
-  const canCancel = t.status === 'running' || t.status === 'pending';
-  return `<div class="download-item">
-    <div class="dl-info">
-      <div class="dl-name" title="${escHtml(t.name)}">${escHtml(t.name)}${retry?`<span style="color:var(--warning);font-size:11px;margin-left:4px">${escHtml(retry)}</span>`:''}</div>
-      <div class="dl-bar-bg"><div class="dl-bar-fill ${barCls}" style="width:${pct}%"></div></div>
-      <div class="dl-sub">${escHtml(sizeStr)}</div>
-    </div>
-    <div class="dl-pct">${pct}%</div>
-    <div class="dl-speed">${escHtml(speedStr)}</div>
-    <span class="dl-status ${t.status}">${statusLabel}</span>
-    <button class="${canCancel?'btn btn-ghost btn-icon btn-sm cancel-btn':'btn btn-ghost btn-icon btn-sm remove-btn'}"
-      data-id="${t.id}" title="${canCancel?'取消':'移除'}">
-      ${canCancel?'✕':'🗑'}
-    </button>
-  </div>`;
-}
-
-function bindCancelBtns() {
-  $('downloadList').querySelectorAll('.cancel-btn,.remove-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      try { await api('DELETE', `/api/downloads/${btn.dataset.id}`); }
-      catch (e) { showToast('操作失败: '+e.message,'error'); }
-    });
-  });
-}
+$('nextPageBtn').addEventListener('click', () => {
+  if (S.lastGroupsData && (S.groupsPage + 1) * 20 < S.lastGroupsData.total) {
+    S.groupsPage++; refreshGroupsPanel();
+  }
+});
 
 // ── Preview ────────────────────────────────────────────────────────────────
 function openPreview(path, name) {
