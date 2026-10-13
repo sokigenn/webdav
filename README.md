@@ -41,11 +41,20 @@ brew install python@3.12
 
 之后直接**双击** `start.command` 即可，会自动打开终端并启动服务，浏览器自动跳转到 `http://localhost:8765`。
 
-也可以在终端手动运行：
+也可以用终端手动运行（适合熟悉命令行的用户）：
 
-```bash
-chmod +x start.sh
-./start.sh
+#### 如何打开终端
+
+方法一（推荐）：按 **Command (⌘) + 空格**，输入 `终端` 或 `Terminal`，回车打开。
+
+方法二：打开 **Finder** → 应用程序 → 实用工具 → **终端**。
+
+#### 运行命令
+
+打开终端后，把 `start.sh` 文件从 Finder **直接拖入**终端窗口，前面加 `bash ` 再回车，例如：
+
+```
+bash /Users/你的用户名/Downloads/webdav-downloader/start.sh
 ```
 
 > 关闭终端窗口即停止服务。
