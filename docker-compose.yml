@@ -1,0 +1,13 @@
+services:
+  webdav-downloader:
+    image: webdav-downloader:latest
+    build: .
+    container_name: webdav-downloader
+    ports:
+      - "8765:8765"
+    volumes:
+      # 修改左边的路径为你 NAS 上实际的下载目录
+      - /极空间/downloads:/downloads
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped

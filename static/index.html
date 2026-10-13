@@ -1,0 +1,1184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebDAV Downloader</title>
+<style>
+:root {
+  --primary: #3b82f6;
+  --primary-h: #2563eb;
+  --bg: #f1f5f9;
+  --surface: #ffffff;
+  --border: #e2e8f0;
+  --text: #0f172a;
+  --muted: #64748b;
+  --success: #16a34a;
+  --error: #dc2626;
+  --warning: #d97706;
+  --radius: 8px;
+  --shadow: 0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.06);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-size: 14px;
+}
+
+/* ── Header ── */
+.header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 20px;
+  height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  box-shadow: var(--shadow);
+  z-index: 10;
+}
+.header-logo {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--primary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.header-status {
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1;
+}
+.status-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #94a3b8; flex-shrink: 0;
+}
+.status-dot.connected { background: var(--success); }
+
+/* ── Buttons ── */
+.btn {
+  padding: 6px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background .15s, opacity .15s;
+  white-space: nowrap;
+}
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+.btn-primary:hover:not(:disabled) { background: var(--primary-h); border-color: var(--primary-h); }
+.btn-outline { background: transparent; color: var(--text); border-color: var(--border); }
+.btn-outline:hover:not(:disabled) { background: var(--bg); }
+.btn-ghost { background: transparent; border-color: transparent; color: var(--muted); }
+.btn-ghost:hover { background: var(--bg); color: var(--text); }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-icon { padding: 6px; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; }
+
+/* ── Connect overlay ── */
+#connectOverlay {
+  position: fixed; inset: 0; background: rgba(15,23,42,.45);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100;
+}
+#connectOverlay.hidden { display: none; }
+.connect-card {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 32px;
+  width: 460px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0,0,0,.18);
+}
+.connect-card h2 { font-size: 18px; margin-bottom: 20px; }
+.form-group { margin-bottom: 14px; }
+.form-group label {
+  display: block; font-size: 12px; font-weight: 600;
+  color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: .4px;
+}
+.form-group input {
+  width: 100%; padding: 8px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  font-size: 14px; color: var(--text);
+  outline: none; transition: border-color .15s;
+}
+.form-group input:focus { border-color: var(--primary); }
+.form-group textarea {
+  width: 100%; padding: 8px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  font-size: 12px; color: var(--text); font-family: 'Cascadia Code', 'Consolas', monospace;
+  outline: none; transition: border-color .15s; resize: vertical;
+}
+.form-group textarea:focus { border-color: var(--primary); }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.connect-footer { display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end; }
+.connect-error { color: var(--error); font-size: 13px; margin-top: 10px; display: none; }
+.connect-error.show { display: block; }
+
+/* ── Main layout ── */
+#main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+#main.hidden { display: none; }
+.main-body {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
+}
+.left-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* ── Toolbar ── */
+.toolbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.breadcrumb { display: flex; align-items: center; gap: 2px; font-size: 13px; flex: 1; overflow: hidden; }
+.breadcrumb-sep { color: var(--muted); padding: 0 2px; }
+.breadcrumb-item { color: var(--primary); cursor: pointer; padding: 3px 6px; border-radius: 4px; white-space: nowrap; }
+.breadcrumb-item:hover { background: #eff6ff; }
+.breadcrumb-item.current { color: var(--text); cursor: default; }
+.breadcrumb-item.current:hover { background: transparent; }
+
+/* ── File table ── */
+.file-area { flex: 1; overflow-y: auto; padding: 16px; min-height: 0; }
+.file-table {
+  width: 100%; border-collapse: collapse; table-layout: fixed;
+  background: var(--surface); border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.file-table thead th {
+  background: #f8fafc; text-align: left;
+  padding: 10px 12px; font-size: 12px; font-weight: 600;
+  color: var(--muted); border-bottom: 1px solid var(--border);
+  white-space: nowrap; position: relative;
+}
+.file-table thead th.sortable { cursor: pointer; user-select: none; }
+.file-table thead th.sortable:hover { color: var(--text); background: #f1f5f9; }
+.file-table thead th.sort-active { color: var(--primary); }
+.col-resize {
+  position: absolute; right: 0; top: 0; bottom: 0; width: 5px;
+  cursor: col-resize; z-index: 2;
+}
+.col-resize:hover, .col-resize.dragging { background: var(--primary); opacity: .5; }
+.file-table thead th:first-child { width: 36px; }
+.col-name { min-width: 60px; overflow: hidden; }
+.col-size { width: 90px; }
+.col-date { width: 140px; }
+.col-actions { width: 80px; text-align: right; }
+.file-table tbody tr { border-bottom: 1px solid var(--border); transition: background .1s; }
+.file-table tbody tr:last-child { border-bottom: none; }
+.file-table tbody tr:hover { background: #f8fafc; }
+.file-table tbody tr.selected { background: #eff6ff; }
+.file-table td { padding: 9px 12px; font-size: 13px; }
+.file-name { cursor: pointer; color: var(--text); display: flex; align-items: center; min-width: 0; overflow: hidden; }
+.file-name:hover .name-text { color: var(--primary); text-decoration: underline; }
+.file-name.is-dir .name-text { font-weight: 500; }
+.name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-icon { margin-right: 6px; font-size: 15px; }
+.size-cell, .date-cell { color: var(--muted); font-size: 12px; }
+.actions-cell { text-align: right; }
+.empty-state { text-align: center; padding: 60px 20px; color: var(--muted); }
+.empty-state .empty-icon { font-size: 40px; margin-bottom: 12px; }
+
+/* ── Selection bar ── */
+.selection-bar {
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: 10px 16px;
+  display: flex; align-items: center; gap: 10px;
+  flex-shrink: 0;
+}
+.sel-count { font-size: 13px; color: var(--muted); flex-shrink: 0; }
+.dir-input-wrap { display: flex; align-items: center; gap: 6px; flex: 1; }
+.dir-input {
+  flex: 1; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  font-size: 13px; color: var(--text); outline: none; min-width: 0;
+}
+.dir-input:focus { border-color: var(--primary); }
+
+/* ── Download panel (right sidebar) ── */
+.download-panel {
+  background: var(--surface);
+  border-left: 2px solid var(--border);
+  width: 380px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Overall stats bar */
+.stats-bar {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.stats-bar.hidden { display: none; }
+.stats-top {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.stats-top .stat-group {
+  display: flex; flex-direction: column; gap: 1px;
+}
+.stat-label { font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+.stat-value { font-size: 14px; font-weight: 700; color: var(--text); }
+.stat-value.speed-val { color: var(--primary); font-size: 16px; }
+.stat-value.eta-val { color: var(--warning); }
+.overall-bar-wrap {
+  height: 6px; background: var(--border); border-radius: 3px;
+  overflow: hidden; margin-bottom: 8px;
+}
+.overall-bar-fill {
+  height: 100%; background: var(--primary); border-radius: 3px;
+  transition: width .5s ease;
+}
+.overall-bar-fill.complete { background: var(--success); }
+.count-pills {
+  display: flex; gap: 10px; flex-wrap: wrap;
+}
+.pill {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 12px; padding: 2px 8px;
+  border-radius: 10px; font-weight: 600; cursor: pointer;
+  transition: opacity .15s;
+}
+.pill:hover { opacity: .8; }
+.pill.running { background: #dbeafe; color: var(--primary); }
+.pill.pending { background: #f1f5f9; color: var(--muted); }
+.pill.done    { background: #dcfce7; color: var(--success); }
+.pill.error   { background: #fee2e2; color: var(--error); }
+.pill.cancelled { background: #f1f5f9; color: var(--muted); }
+.stats-actions {
+  display: flex; gap: 6px; margin-left: auto; flex-shrink: 0;
+}
+
+/* Panel header with tabs */
+.panel-header {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.panel-tab {
+  padding: 8px 16px;
+  font-size: 13px; font-weight: 500;
+  color: var(--muted); cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color .15s, border-color .15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.panel-tab:hover { color: var(--text); }
+.panel-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+.panel-tab-count {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--border); border-radius: 8px;
+  font-size: 10px; font-weight: 700;
+  padding: 1px 5px; min-width: 16px; margin-left: 4px;
+  color: var(--muted);
+}
+.panel-tab.active .panel-tab-count { background: var(--primary); color: #fff; }
+
+/* Download list */
+.download-list { overflow-y: auto; flex: 1; min-height: 0; }
+
+.download-item {
+  display: grid;
+  grid-template-columns: 1fr 56px 80px 80px auto;
+  gap: 10px; align-items: center;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.download-item:last-child { border-bottom: none; }
+.dl-info { min-width: 0; }
+.dl-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-bar-bg { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 4px; }
+.dl-bar-fill { height: 100%; background: var(--primary); border-radius: 2px; transition: width .4s; }
+.dl-bar-fill.done { background: var(--success); }
+.dl-bar-fill.error { background: var(--error); }
+.dl-bar-fill.cancelled { background: var(--muted); }
+.dl-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.dl-pct { font-size: 13px; font-weight: 700; color: var(--muted); text-align: right; }
+.dl-speed { font-size: 12px; color: var(--primary); text-align: right; white-space: nowrap; }
+.dl-status {
+  font-size: 11px; font-weight: 600; padding: 2px 7px;
+  border-radius: 10px; white-space: nowrap; text-align: center;
+}
+.dl-status.running { background: #dbeafe; color: var(--primary); }
+.dl-status.done    { background: #dcfce7; color: var(--success); }
+.dl-status.error   { background: #fee2e2; color: var(--error); }
+.dl-status.pending { background: #f1f5f9; color: var(--muted); }
+.dl-status.cancelled { background: #f1f5f9; color: var(--muted); }
+.dl-status.retrying { background: #fef9c3; color: var(--warning); }
+
+/* Pagination */
+.pagination {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px; border-top: 1px solid var(--border);
+  font-size: 13px; color: var(--muted); justify-content: center;
+  flex-shrink: 0;
+}
+.pagination.hidden { display: none; }
+
+/* Empty list state */
+.dl-empty {
+  padding: 20px; text-align: center; color: var(--muted); font-size: 13px;
+}
+
+/* ── Preview modal ── */
+#previewModal {
+  position: fixed; inset: 0; background: rgba(15,23,42,.7);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 200; padding: 20px;
+}
+#previewModal.hidden { display: none; }
+.preview-card {
+  background: var(--surface); border-radius: 12px;
+  width: 90vw; max-width: 960px; max-height: 90vh;
+  display: flex; flex-direction: column;
+  box-shadow: 0 25px 80px rgba(0,0,0,.35);
+  overflow: hidden;
+}
+.preview-header {
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 10px;
+}
+.preview-title { font-size: 14px; font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-body {
+  flex: 1; overflow: auto;
+  display: flex; align-items: center; justify-content: center;
+  padding: 12px; background: #0f172a; min-height: 200px;
+}
+.preview-body img { max-width: 100%; max-height: 75vh; object-fit: contain; border-radius: 4px; }
+.preview-body video, .preview-body audio { max-width: 100%; max-height: 75vh; }
+.preview-body audio { width: 100%; background: var(--surface); border-radius: 8px; }
+.preview-body iframe { width: 100%; height: 75vh; border: none; background: var(--surface); }
+.preview-body pre {
+  color: #e2e8f0; font-family: 'Cascadia Code', 'JetBrains Mono', monospace;
+  font-size: 12px; line-height: 1.6; white-space: pre-wrap;
+  word-break: break-all; text-align: left; width: 100%;
+  max-height: 75vh; overflow-y: auto;
+}
+.preview-loading { color: var(--muted); font-size: 14px; display: flex; align-items: center; gap: 8px; }
+
+/* ── Spinner ── */
+.spinner {
+  width: 18px; height: 18px;
+  border: 2px solid var(--border); border-top-color: var(--primary);
+  border-radius: 50%; animation: spin .7s linear infinite; flex-shrink: 0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Toasts ── */
+#toast-container {
+  position: fixed; bottom: 20px; right: 20px;
+  display: flex; flex-direction: column; gap: 8px; z-index: 999;
+}
+.toast {
+  background: var(--surface); color: var(--text);
+  padding: 10px 16px; border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgba(0,0,0,.15);
+  font-size: 13px; border-left: 3px solid var(--primary);
+  animation: slideIn .2s ease; max-width: 320px;
+}
+.toast.error { border-left-color: var(--error); }
+.toast.success { border-left-color: var(--success); }
+@keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="header-logo">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="7 10 12 15 17 10"/>
+      <line x1="12" y1="15" x2="12" y2="3"/>
+    </svg>
+    WebDAV Downloader
+  </div>
+  <div class="header-status">
+    <span class="status-dot" id="statusDot"></span>
+    <span id="statusText">未连接</span>
+  </div>
+  <button class="btn btn-outline btn-sm" id="settingsBtn">⚙ 连接设置</button>
+</header>
+
+<!-- Connect overlay -->
+<div id="connectOverlay">
+  <div class="connect-card">
+    <h2>连接 WebDAV 服务器</h2>
+    <div class="form-group">
+      <label>服务器地址</label>
+      <input id="cfUrl" type="url" placeholder="https://example.com/dav/"/>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>用户名（可选）</label>
+        <input id="cfUser" type="text" placeholder="username" autocomplete="username"/>
+      </div>
+      <div class="form-group">
+        <label>密码（可选）</label>
+        <input id="cfPass" type="password" placeholder="password" autocomplete="current-password"/>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>最大并发数（1–20）</label>
+      <input id="cfConcurrent" type="number" min="1" max="20" value="5"/>
+    </div>
+    <div class="form-group">
+      <label>下载地址覆盖（可选）</label>
+      <input id="cfDownloadUrl" type="url" placeholder="http://192.168.1.100/dav/  留空则与上方相同"/>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">
+        适用场景：浏览走外网域名，下载走内网 IP 直连加速；或服务端返回的 Host 与实际可访问地址不一致。
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Hosts 覆盖（可选）</label>
+      <textarea id="cfHosts" rows="4" placeholder="# /etc/hosts 格式，绕过运营商 DNS 污染
+# 无需修改系统文件，无需管理员权限
+1.2.3.4  webdav.example.com
+5.6.7.8  cdn.example.com  assets.example.com"></textarea>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">
+        格式与系统 hosts 文件相同：<code>IP 域名</code>，# 开头为注释。连接后生效，断开自动清除。
+      </div>
+    </div>
+    <div class="connect-error" id="connectError"></div>
+    <div class="connect-footer">
+      <button class="btn btn-ghost" id="cancelConnectBtn">取消</button>
+      <button class="btn btn-primary" id="doConnectBtn"><span id="connectBtnText">连接</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- Main -->
+<div id="main" class="hidden">
+
+  <div class="toolbar">
+    <div class="breadcrumb" id="breadcrumb"></div>
+    <button class="btn btn-ghost btn-icon btn-sm" id="refreshBtn" title="刷新">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="main-body">
+  <div class="left-pane">
+
+  <div class="file-area" id="fileArea">
+    <div id="emptyState" class="empty-state" style="display:none">
+      <div class="empty-icon">📂</div><p>此目录为空</p>
+    </div>
+    <div id="loadingState" style="display:flex;align-items:center;gap:10px;padding:40px;justify-content:center;color:var(--muted)">
+      <div class="spinner"></div> 正在加载…
+    </div>
+    <table class="file-table" id="fileTable" style="display:none">
+      <thead>
+        <tr>
+          <th><input type="checkbox" id="selectAllCb" title="全选/取消全选"></th>
+          <th class="col-name sortable sort-active" data-sort="name">名称 <span class="sort-arrow">↑</span><div class="col-resize"></div></th>
+          <th class="col-size sortable" data-sort="size">大小 <span class="sort-arrow">↕</span><div class="col-resize"></div></th>
+          <th class="col-date sortable" data-sort="last_modified">修改时间 <span class="sort-arrow">↕</span><div class="col-resize"></div></th>
+          <th class="col-actions"></th>
+        </tr>
+      </thead>
+      <tbody id="fileBody"></tbody>
+    </table>
+  </div>
+
+  <div class="selection-bar">
+    <span class="sel-count" id="selCount">已选 0 项</span>
+    <div class="dir-input-wrap">
+      <span style="font-size:12px;color:var(--muted);flex-shrink:0">下载到:</span>
+      <input class="dir-input" id="saveDir" placeholder="输入或选择保存目录…"/>
+      <button class="btn btn-outline btn-sm" id="selectDirBtn">浏览…</button>
+    </div>
+    <button class="btn btn-primary btn-sm" id="downloadBtn" disabled>
+      ⬇ 下载选中（<span id="downloadCount">0</span>）
+    </button>
+  </div>
+
+  </div><!-- /.left-pane -->
+
+  <!-- Download panel (right sidebar) -->
+  <div class="download-panel" id="downloadPanel">
+
+    <!-- Overall stats bar (hidden when queue empty) -->
+    <div class="stats-bar hidden" id="statsBar">
+      <div style="display:flex;align-items:flex-start;gap:0">
+        <div style="flex:1">
+          <div class="stats-top">
+            <div class="stat-group">
+              <span class="stat-label">文件进度</span>
+              <span class="stat-value" id="stFiles">—</span>
+            </div>
+            <div class="stat-group">
+              <span class="stat-label">数据量</span>
+              <span class="stat-value" id="stBytes">—</span>
+            </div>
+            <div class="stat-group">
+              <span class="stat-label">当前速度</span>
+              <span class="stat-value speed-val" id="stSpeed">—</span>
+            </div>
+            <div class="stat-group">
+              <span class="stat-label">预计剩余</span>
+              <span class="stat-value eta-val" id="stETA">—</span>
+            </div>
+          </div>
+          <div class="overall-bar-wrap">
+            <div class="overall-bar-fill" id="overallBar" style="width:0%"></div>
+          </div>
+          <div class="count-pills">
+            <span class="pill running" id="pillRunning" title="点击查看下载中">⚡ <strong id="cntRunning">0</strong></span>
+            <span class="pill pending" id="pillPending" title="点击查看等待中">⏳ <strong id="cntPending">0</strong></span>
+            <span class="pill done" id="pillDone" title="点击查看已完成">✓ <strong id="cntDone">0</strong></span>
+            <span class="pill error" id="pillError" title="点击查看失败">✗ <strong id="cntError">0</strong></span>
+          </div>
+        </div>
+        <div class="stats-actions">
+          <button class="btn btn-ghost btn-sm" id="cancelAllBtn">取消等待</button>
+          <button class="btn btn-ghost btn-sm" id="clearDoneBtn">清除已完成</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="panel-header" id="panelHeader">
+      <span class="panel-tab active" data-tab="running">下载中 <span class="panel-tab-count" id="tabCntRunning">0</span></span>
+      <span class="panel-tab" data-tab="error">失败 <span class="panel-tab-count" id="tabCntError">0</span></span>
+      <span class="panel-tab" data-tab="done">已完成 <span class="panel-tab-count" id="tabCntDone">0</span></span>
+      <span class="panel-tab" data-tab="all">全部</span>
+    </div>
+
+    <div class="download-list" id="downloadList">
+      <div class="dl-empty">暂无下载任务</div>
+    </div>
+
+    <div class="pagination hidden" id="pagination">
+      <button class="btn btn-ghost btn-sm" id="prevPageBtn">‹ 上一页</button>
+      <span id="pageInfo" style="font-size:12px;color:var(--muted)"></span>
+      <button class="btn btn-ghost btn-sm" id="nextPageBtn">下一页 ›</button>
+    </div>
+
+  </div><!-- /.download-panel -->
+  </div><!-- /.main-body -->
+</div>
+
+<!-- Preview modal -->
+<div id="previewModal" class="hidden">
+  <div class="preview-card">
+    <div class="preview-header">
+      <span class="preview-title" id="previewTitle"></span>
+      <button class="btn btn-ghost btn-icon" id="closePreviewBtn">✕</button>
+    </div>
+    <div class="preview-body" id="previewBody">
+      <div class="preview-loading"><div class="spinner"></div> 正在加载…</div>
+    </div>
+  </div>
+</div>
+
+<div id="toast-container"></div>
+
+<script>
+'use strict';
+
+// ── State ──────────────────────────────────────────────────────────────────
+const S = {
+  connected: false,
+  config: {},
+  currentPath: '/',
+  files: [],
+  selected: new Set(),
+  saveDir: localStorage.getItem('saveDir') || '',
+  activeTab: 'running',
+  listPage: 0,
+  listTotal: 0,
+  listLimit: 50,
+  pollTimer: null,
+  lastSummary: null,
+  sortField: 'name',
+  sortDir: 1,
+};
+
+const $ = id => document.getElementById(id);
+
+// ── Utilities ──────────────────────────────────────────────────────────────
+function fmtSize(b) {
+  if (!b || b === 0) return '—';
+  const u = ['B','KB','MB','GB','TB'];
+  const i = Math.min(Math.floor(Math.log(b) / Math.log(1024)), 4);
+  return (b / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + u[i];
+}
+function fmtSpeed(bps) { return bps > 100 ? fmtSize(bps) + '/s' : '—'; }
+function fmtDate(s) {
+  if (!s) return '—';
+  try { return new Date(s).toLocaleDateString('zh-CN'); } catch { return s.slice(0,16); }
+}
+function fmtETA(sec) {
+  if (sec === null || sec === undefined || sec < 0) return '—';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  if (h > 0) return `${h}时${m}分${s}秒`;
+  if (m > 0) return `${m}分${s}秒`;
+  return `${s}秒`;
+}
+function fmtNum(n) { return n >= 10000 ? (n/10000).toFixed(1)+'万' : String(n); }
+
+function getIcon(name, isDir) {
+  if (isDir) return '📁';
+  const e = name.split('.').pop().toLowerCase();
+  if (['jpg','jpeg','png','gif','webp','bmp','svg','ico','avif'].includes(e)) return '🖼️';
+  if (['mp4','mkv','avi','mov','wmv','flv','webm','ts'].includes(e)) return '🎬';
+  if (['mp3','flac','aac','m4a','ogg','wav','wma','opus'].includes(e)) return '🎵';
+  if (['pdf'].includes(e)) return '📄';
+  if (['zip','tar','gz','bz2','xz','7z','rar','zst'].includes(e)) return '📦';
+  if (['txt','md','log','csv'].includes(e)) return '📝';
+  if (['js','ts','py','java','cpp','c','go','rs','rb','php','html','css','json','xml','yaml','yml','sh','bat'].includes(e)) return '💻';
+  return '📋';
+}
+function previewType(name) {
+  const e = name.split('.').pop().toLowerCase();
+  if (['jpg','jpeg','png','gif','webp','bmp','svg','ico','avif'].includes(e)) return 'image';
+  if (['mp4','mkv','avi','mov','webm','ts'].includes(e)) return 'video';
+  if (['mp3','flac','aac','m4a','ogg','wav','opus'].includes(e)) return 'audio';
+  if (e === 'pdf') return 'pdf';
+  if (['txt','md','log','csv','json','xml','yaml','yml','sh','bat',
+       'js','ts','py','java','cpp','c','go','rs','rb','php','html','css'].includes(e)) return 'text';
+  return null;
+}
+
+function showToast(msg, type='info') {
+  const t = document.createElement('div');
+  t.className = 'toast ' + type;
+  t.textContent = msg;
+  $('toast-container').appendChild(t);
+  setTimeout(() => t.remove(), 3500);
+}
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+async function api(method, url, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  const r = await fetch(url, opts);
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.detail || JSON.stringify(d));
+  return d;
+}
+
+// ── Connection ─────────────────────────────────────────────────────────────
+function setConnected(cfg) {
+  S.connected = true; S.config = cfg;
+  $('statusDot').className = 'status-dot connected';
+  $('statusText').textContent = new URL(cfg.url).hostname;
+  $('connectOverlay').classList.add('hidden');
+  $('main').classList.remove('hidden');
+  startPoll();
+  navigateTo('/');
+}
+function setDisconnected() {
+  S.connected = false; S.config = {};
+  $('statusDot').className = 'status-dot';
+  $('statusText').textContent = '未连接';
+  $('main').classList.add('hidden');
+  $('connectOverlay').classList.remove('hidden');
+  stopPoll();
+}
+
+$('doConnectBtn').addEventListener('click', async () => {
+  const url   = $('cfUrl').value.trim();
+  const user  = $('cfUser').value.trim();
+  const pass  = $('cfPass').value;
+  const conc  = Math.min(20, Math.max(1, parseInt($('cfConcurrent').value) || 5));
+  const dlUrl = $('cfDownloadUrl').value.trim();
+  const hosts = $('cfHosts').value;
+  if (!url) { showConnectError('请输入服务器地址'); return; }
+  $('connectBtnText').textContent = '连接中…';
+  $('doConnectBtn').disabled = true;
+  $('connectError').classList.remove('show');
+  try {
+    await api('POST', '/api/connect', { url, username: user, password: pass, max_concurrent: conc, download_url: dlUrl, hosts });
+    localStorage.setItem('cfHosts', hosts);
+    setConnected({ url, username: user, max_concurrent: conc, download_url: dlUrl, hosts });
+  } catch (e) { showConnectError(e.message); }
+  finally { $('connectBtnText').textContent = '连接'; $('doConnectBtn').disabled = false; }
+});
+['cfUrl','cfPass'].forEach(id => $('cfPass').addEventListener('keydown', e => { if (e.key==='Enter') $('doConnectBtn').click(); }));
+$('cfUrl').addEventListener('keydown', e => { if (e.key==='Enter') $('doConnectBtn').click(); });
+function showConnectError(msg) { const el=$('connectError'); el.textContent='⚠ '+msg; el.classList.add('show'); }
+$('cancelConnectBtn').addEventListener('click', () => { if (S.connected) $('connectOverlay').classList.add('hidden'); });
+$('settingsBtn').addEventListener('click', () => {
+  if (S.connected) {
+    $('cfUrl').value = S.config.url || '';
+    $('cfUser').value = S.config.username || '';
+    $('cfPass').value = '';
+    $('cfConcurrent').value = S.config.max_concurrent || 5;
+    $('cfDownloadUrl').value = S.config.download_url || '';
+    $('cfHosts').value = S.config.hosts || '';
+  }
+  $('connectError').classList.remove('show');
+  $('connectOverlay').classList.remove('hidden');
+});
+
+// ── File navigation ────────────────────────────────────────────────────────
+async function navigateTo(path) {
+  S.currentPath = path;
+  S.selected.clear();
+  updateSelectionUI();
+  showLoading(true);
+  renderBreadcrumb(path);
+  try {
+    const data = await api('GET', '/api/files?path=' + encodeURIComponent(path));
+    S.files = data.items || [];
+    renderFiles(S.files);
+  } catch (e) { showToast('加载失败: ' + e.message, 'error'); renderFiles([]); }
+  showLoading(false);
+}
+function showLoading(on) {
+  $('loadingState').style.display = on ? 'flex' : 'none';
+  $('fileTable').style.display = on ? 'none' : '';
+  $('emptyState').style.display = 'none';
+}
+function renderBreadcrumb(path) {
+  const parts = path.split('/').filter(Boolean);
+  let html = `<span class="breadcrumb-item" data-path="/">根目录</span>`;
+  let cum = '';
+  parts.forEach((p, i) => {
+    cum += '/' + p;
+    const cur = i === parts.length - 1;
+    html += `<span class="breadcrumb-sep">/</span><span class="${cur?'breadcrumb-item current':'breadcrumb-item'}" data-path="${escHtml(cum)}">${escHtml(p)}</span>`;
+  });
+  $('breadcrumb').innerHTML = html;
+  $('breadcrumb').querySelectorAll('.breadcrumb-item:not(.current)').forEach(el => {
+    el.addEventListener('click', () => navigateTo(el.dataset.path));
+  });
+}
+function renderFiles(files) {
+  if (!files.length) { $('fileTable').style.display='none'; $('emptyState').style.display=''; return; }
+  $('emptyState').style.display = 'none';
+  $('fileTable').style.display = '';
+
+  // Sort
+  const sorted = [...files].sort((a, b) => {
+    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1; // dirs always first
+    let va = a[S.sortField] ?? '', vb = b[S.sortField] ?? '';
+    if (S.sortField === 'size') { va = a.is_dir ? -1 : (a.size||0); vb = b.is_dir ? -1 : (b.size||0); }
+    if (typeof va === 'string') return S.sortDir * va.localeCompare(vb, 'zh-CN');
+    return S.sortDir * (va - vb);
+  });
+
+  // Update header arrows
+  $('fileTable').querySelectorAll('thead th.sortable').forEach(th => {
+    const arrow = th.querySelector('.sort-arrow');
+    if (th.dataset.sort === S.sortField) {
+      th.classList.add('sort-active');
+      arrow.textContent = S.sortDir === 1 ? '↑' : '↓';
+    } else {
+      th.classList.remove('sort-active');
+      arrow.textContent = '↕';
+    }
+  });
+
+  $('fileBody').innerHTML = sorted.map(f => {
+    const icon = getIcon(f.name, f.is_dir);
+    const ptype = previewType(f.name);
+    const sel = S.selected.has(f.path);
+    return `<tr class="${sel?'selected':''}" data-path="${escHtml(f.path)}">
+      <td><input type="checkbox" class="file-cb" data-path="${escHtml(f.path)}" ${sel?'checked':''}></td>
+      <td><div class="file-name ${f.is_dir?'is-dir':''}" data-path="${escHtml(f.path)}" data-isdir="${f.is_dir}" data-name="${escHtml(f.name)}">
+        <span class="file-icon">${icon}</span><span class="name-text" title="${escHtml(f.name)}">${escHtml(f.name)}</span>
+      </div></td>
+      <td class="size-cell">${f.is_dir?'—':fmtSize(f.size)}</td>
+      <td class="date-cell">${fmtDate(f.last_modified)}</td>
+      <td class="actions-cell">${ptype?`<button class="btn btn-ghost btn-sm preview-btn" data-path="${escHtml(f.path)}" data-name="${escHtml(f.name)}" title="预览">👁</button>`:''}</td>
+    </tr>`;
+  }).join('');
+
+  $('fileBody').querySelectorAll('.file-cb').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (cb.checked) S.selected.add(cb.dataset.path); else S.selected.delete(cb.dataset.path);
+      cb.closest('tr').classList.toggle('selected', cb.checked);
+      updateSelectionUI();
+    });
+  });
+  $('fileBody').querySelectorAll('.file-name').forEach(el => {
+    el.addEventListener('click', () => {
+      if (el.dataset.isdir === 'true') navigateTo(el.dataset.path);
+      else { const pt = previewType(el.dataset.name); if (pt) openPreview(el.dataset.path, el.dataset.name); }
+    });
+  });
+  $('fileBody').querySelectorAll('.preview-btn').forEach(btn => {
+    btn.addEventListener('click', e => { e.stopPropagation(); openPreview(btn.dataset.path, btn.dataset.name); });
+  });
+  const allCb = $('selectAllCb');
+  const filePaths = files.filter(f => !f.is_dir).map(f => f.path);
+  allCb.checked = filePaths.length > 0 && filePaths.every(p => S.selected.has(p));
+  allCb.indeterminate = !allCb.checked && filePaths.some(p => S.selected.has(p));
+}
+$('selectAllCb').addEventListener('change', function() {
+  S.files.filter(f => !f.is_dir).forEach(f => { if (this.checked) S.selected.add(f.path); else S.selected.delete(f.path); });
+  renderFiles(S.files); updateSelectionUI();
+});
+
+// Sort headers
+document.addEventListener('click', e => {
+  if (e.target.closest('.col-resize')) return; // don't sort when clicking resize handle
+  const th = e.target.closest('th.sortable');
+  if (!th) return;
+  const field = th.dataset.sort;
+  if (S.sortField === field) S.sortDir *= -1;
+  else { S.sortField = field; S.sortDir = 1; }
+  renderFiles(S.files);
+});
+
+// Column resize
+(function() {
+  let drag = null;
+  document.addEventListener('mousedown', e => {
+    const handle = e.target.closest('.col-resize');
+    if (!handle) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const th = handle.closest('th');
+    drag = { th, x: e.clientX, w: th.offsetWidth };
+    handle.classList.add('dragging');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  });
+  document.addEventListener('mousemove', e => {
+    if (!drag) return;
+    const w = Math.max(60, drag.w + (e.clientX - drag.x));
+    drag.th.style.width = w + 'px';
+    drag.th.style.minWidth = w + 'px';
+  });
+  document.addEventListener('mouseup', () => {
+    if (!drag) return;
+    drag.th.querySelector('.col-resize')?.classList.remove('dragging');
+    drag = null;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  });
+})();
+
+$('refreshBtn').addEventListener('click', () => navigateTo(S.currentPath));
+
+// ── Recursive directory expansion ──────────────────────────────────────────
+// basePath: the directory the user initiated download from (e.g. "/music")
+// Files inside get save_as = relative path from basePath (e.g. "albumA/song.mp3")
+async function expandToFiles(items, basePath) {
+  const base = (basePath || '').replace(/\/?$/, '/');
+  const result = [];
+  for (const item of items) {
+    if (!item.is_dir) {
+      const rel = item.path.startsWith(base) ? item.path.slice(base.length) : item.name;
+      result.push({ path: item.path, name: item.name, size: item.size, save_as: rel });
+    } else {
+      try {
+        const data = await api('GET', '/api/files?path=' + encodeURIComponent(item.path));
+        const children = await expandToFiles(data.items || [], base);
+        result.push(...children);
+      } catch (e) {
+        showToast(`无法展开目录 ${item.name}: ${e.message}`, 'error');
+      }
+    }
+  }
+  return result;
+}
+function updateSelectionUI() {
+  const n = S.selected.size;
+  $('selCount').textContent = `已选 ${n} 项`;
+  $('downloadCount').textContent = n;
+  $('downloadBtn').disabled = n === 0;
+}
+
+// ── Save directory ─────────────────────────────────────────────────────────
+$('saveDir').value = S.saveDir;
+$('saveDir').addEventListener('input', () => { S.saveDir=$('saveDir').value.trim(); localStorage.setItem('saveDir',S.saveDir); });
+$('selectDirBtn').addEventListener('click', async () => {
+  try {
+    const d = await api('GET', '/api/select-dir');
+    if (d.path) { $('saveDir').value=d.path; S.saveDir=d.path; localStorage.setItem('saveDir',S.saveDir); }
+    else if (d.error) showToast(d.error, 'info');
+  } catch { showToast('无法打开文件夹选择对话框','error'); }
+});
+
+// ── Start download ─────────────────────────────────────────────────────────
+$('downloadBtn').addEventListener('click', async () => {
+  if (!S.saveDir) { showToast('请先设置下载目录','error'); return; }
+  const fmap = Object.fromEntries(S.files.map(f => [f.path, f]));
+  const selected = [...S.selected].map(p => fmap[p]).filter(Boolean);
+  if (!selected.length) return;
+
+  const hasDirs = selected.some(f => f.is_dir);
+  if (hasDirs) showToast('正在展开目录…', 'info');
+
+  let toDownload;
+  try {
+    toDownload = await expandToFiles(selected, S.currentPath);
+  } catch (e) {
+    showToast('展开目录失败: ' + e.message, 'error'); return;
+  }
+  if (!toDownload.length) { showToast('选中的目录中没有文件', 'info'); return; }
+
+  try {
+    const r = await api('POST', '/api/downloads/start', {
+      files: toDownload.map(f => ({ path: f.path, name: f.name, size: f.size, save_as: f.save_as })),
+      save_dir: S.saveDir,
+    });
+    showToast(`已加入队列：${r.count} 个文件`, 'success');
+    S.selected.clear(); renderFiles(S.files); updateSelectionUI();
+    $('statsBar').classList.remove('hidden');
+    switchTab('running');
+  } catch (e) { showToast('下载失败: '+e.message,'error'); }
+});
+
+// ── Queue controls ─────────────────────────────────────────────────────────
+$('cancelAllBtn').addEventListener('click', async () => {
+  try { await api('POST','/api/downloads/cancel-all'); showToast('已取消所有等待中的任务'); } catch{}
+});
+$('clearDoneBtn').addEventListener('click', async () => {
+  try { await api('POST','/api/downloads/clear-finished'); showToast('已清除完成/失败任务'); } catch{}
+});
+
+// ── Tabs ───────────────────────────────────────────────────────────────────
+$('panelHeader').querySelectorAll('.panel-tab').forEach(tab => {
+  tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+});
+['pillRunning','pillPending'].forEach(id => $('pillRunning').addEventListener('click', () => switchTab('running')));
+$('pillRunning').addEventListener('click', () => switchTab('running'));
+$('pillDone').addEventListener('click', () => switchTab('done'));
+$('pillError').addEventListener('click', () => switchTab('error'));
+
+function switchTab(tab) {
+  S.activeTab = tab;
+  S.listPage = 0;
+  $('panelHeader').querySelectorAll('.panel-tab').forEach(el => {
+    el.classList.toggle('active', el.dataset.tab === tab);
+  });
+  if (tab === 'running') {
+    // Rendered from summary poll, nothing to fetch
+    if (S.lastSummary) renderRunningTasks(S.lastSummary.running_tasks || []);
+    $('pagination').classList.add('hidden');
+  } else {
+    loadTabPage(tab, 0);
+  }
+}
+
+async function loadTabPage(status, page) {
+  S.listPage = page;
+  const statusParam = status === 'all' ? '' : status;
+  try {
+    const d = await api('GET', `/api/downloads/list?${statusParam?'status='+statusParam+'&':''}page=${page}&limit=${S.listLimit}`);
+    S.listTotal = d.total;
+    renderTaskList(d.tasks, d.total, page);
+  } catch {}
+}
+
+// ── Polling ────────────────────────────────────────────────────────────────
+function startPoll() {
+  stopPoll();
+  S.pollTimer = setInterval(async () => {
+    try {
+      const d = await api('GET', '/api/downloads');
+      S.lastSummary = d;
+      renderStats(d);
+      if (S.activeTab === 'running') renderRunningTasks(d.running_tasks || []);
+    } catch {}
+  }, 1000);
+}
+function stopPoll() { if (S.pollTimer) { clearInterval(S.pollTimer); S.pollTimer = null; } }
+
+// ── Stats render ───────────────────────────────────────────────────────────
+function renderStats(d) {
+  const hasAny = d.total > 0;
+  $('statsBar').classList.toggle('hidden', !hasAny);
+  if (!hasAny) return;
+
+  // Progress bar
+  const pct = d.total > 0 ? Math.round(d.done / d.total * 100) : 0;
+  const bar = $('overallBar');
+  bar.style.width = pct + '%';
+  bar.className = 'overall-bar-fill' + (pct >= 100 ? ' complete' : '');
+
+  // Stats values
+  $('stFiles').textContent = `${fmtNum(d.done)} / ${fmtNum(d.total)} 个文件（${pct}%）`;
+  if (d.total_bytes > 0) {
+    $('stBytes').textContent = `${fmtSize(d.downloaded_bytes)} / ${fmtSize(d.total_bytes)}`;
+  } else {
+    $('stBytes').textContent = fmtSize(d.downloaded_bytes);
+  }
+  $('stSpeed').textContent = fmtSpeed(d.speed);
+  $('stETA').textContent = d.running > 0 ? fmtETA(d.eta_seconds) : (d.done === d.total && d.total > 0 ? '已完成' : '—');
+
+  // Count pills
+  $('cntRunning').textContent = d.running;
+  $('cntPending').textContent = fmtNum(d.pending);
+  $('cntDone').textContent = fmtNum(d.done);
+  $('cntError').textContent = d.error;
+
+  // Tab counts
+  $('tabCntRunning').textContent = d.running;
+  $('tabCntError').textContent = d.error;
+  $('tabCntDone').textContent = fmtNum(d.done);
+}
+
+// ── Running tasks render ───────────────────────────────────────────────────
+function renderRunningTasks(tasks) {
+  if (!tasks.length) {
+    $('downloadList').innerHTML = '<div class="dl-empty">暂无下载中的任务</div>';
+    $('pagination').classList.add('hidden');
+    return;
+  }
+  $('downloadList').innerHTML = tasks.map(t => buildTaskRow(t)).join('');
+  $('pagination').classList.add('hidden');
+  bindCancelBtns();
+}
+
+// ── Paginated task list render ─────────────────────────────────────────────
+function renderTaskList(tasks, total, page) {
+  if (!tasks.length) {
+    $('downloadList').innerHTML = '<div class="dl-empty">暂无记录</div>';
+    $('pagination').classList.add('hidden');
+    return;
+  }
+  $('downloadList').innerHTML = tasks.map(t => buildTaskRow(t)).join('');
+  bindCancelBtns();
+
+  const totalPages = Math.ceil(total / S.listLimit);
+  if (totalPages > 1) {
+    $('pagination').classList.remove('hidden');
+    $('pageInfo').textContent = `第 ${page+1} / ${totalPages} 页（共 ${fmtNum(total)} 条）`;
+    $('prevPageBtn').disabled = page === 0;
+    $('nextPageBtn').disabled = page >= totalPages - 1;
+  } else {
+    $('pagination').classList.add('hidden');
+  }
+}
+
+$('prevPageBtn').addEventListener('click', () => { if (S.listPage > 0) loadTabPage(S.activeTab, S.listPage - 1); });
+$('nextPageBtn').addEventListener('click', () => {
+  const total = S.listTotal;
+  if ((S.listPage + 1) * S.listLimit < total) loadTabPage(S.activeTab, S.listPage + 1);
+});
+
+function buildTaskRow(t) {
+  const pct = t.progress;
+  const barCls = t.status === 'done' ? 'done' : t.status === 'error' ? 'error' : t.status === 'cancelled' ? 'cancelled' : '';
+  const statusLabel = {running:'下载中', pending:'等待中', done:'完成', error:'失败', cancelled:'已取消', retrying:'重试中'}[t.status] || t.status;
+  const speedStr = t.status === 'running' && t.speed > 100 ? fmtSpeed(t.speed) : '';
+  const sizeStr = t.status === 'done' ? fmtSize(t.total_size)
+    : t.status === 'error' ? (t.error || '错误').slice(0, 40)
+    : t.total_size > 0 ? `${fmtSize(t.downloaded)} / ${fmtSize(t.total_size)}` : fmtSize(t.downloaded);
+  const retry = t.retry_count > 0 ? ` 重试${t.retry_count}` : '';
+  const canCancel = t.status === 'running' || t.status === 'pending';
+  return `<div class="download-item">
+    <div class="dl-info">
+      <div class="dl-name" title="${escHtml(t.name)}">${escHtml(t.name)}${retry?`<span style="color:var(--warning);font-size:11px;margin-left:4px">${escHtml(retry)}</span>`:''}</div>
+      <div class="dl-bar-bg"><div class="dl-bar-fill ${barCls}" style="width:${pct}%"></div></div>
+      <div class="dl-sub">${escHtml(sizeStr)}</div>
+    </div>
+    <div class="dl-pct">${pct}%</div>
+    <div class="dl-speed">${escHtml(speedStr)}</div>
+    <span class="dl-status ${t.status}">${statusLabel}</span>
+    <button class="${canCancel?'btn btn-ghost btn-icon btn-sm cancel-btn':'btn btn-ghost btn-icon btn-sm remove-btn'}"
+      data-id="${t.id}" title="${canCancel?'取消':'移除'}">
+      ${canCancel?'✕':'🗑'}
+    </button>
+  </div>`;
+}
+
+function bindCancelBtns() {
+  $('downloadList').querySelectorAll('.cancel-btn,.remove-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try { await api('DELETE', `/api/downloads/${btn.dataset.id}`); }
+      catch (e) { showToast('操作失败: '+e.message,'error'); }
+    });
+  });
+}
+
+// ── Preview ────────────────────────────────────────────────────────────────
+function openPreview(path, name) {
+  const modal = $('previewModal');
+  const body = $('previewBody');
+  $('previewTitle').textContent = name;
+  body.innerHTML = '<div class="preview-loading"><div class="spinner"></div>正在加载…</div>';
+  modal.classList.remove('hidden');
+  const ptype = previewType(name);
+  const proxyUrl = `/api/proxy?path=${encodeURIComponent(path)}`;
+  setTimeout(async () => {
+    if (ptype === 'image') {
+      body.innerHTML = `<img src="${proxyUrl}" alt="${escHtml(name)}" loading="lazy">`;
+    } else if (ptype === 'video') {
+      body.innerHTML = `<video controls preload="metadata" src="${proxyUrl}"></video>`;
+    } else if (ptype === 'audio') {
+      body.innerHTML = `<audio controls preload="metadata" src="${proxyUrl}"></audio>`;
+    } else if (ptype === 'pdf') {
+      body.innerHTML = `<iframe src="${proxyUrl}" title="${escHtml(name)}"></iframe>`;
+    } else if (ptype === 'text') {
+      try {
+        const r = await fetch(proxyUrl);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        body.innerHTML = `<pre>${escHtml(await r.text())}</pre>`;
+      } catch (e) { body.innerHTML = `<div style="color:var(--error);padding:20px">预览失败：${escHtml(e.message)}</div>`; }
+    }
+  }, 50);
+}
+$('closePreviewBtn').addEventListener('click', closePreview);
+$('previewModal').addEventListener('click', e => { if (e.target === $('previewModal')) closePreview(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closePreview(); });
+function closePreview() {
+  $('previewModal').classList.add('hidden');
+  $('previewModal').querySelectorAll('video,audio').forEach(el => el.pause());
+  $('previewBody').innerHTML = '';
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+(async () => {
+  if (S.saveDir) $('saveDir').value = S.saveDir;
+  $('cfHosts').value = localStorage.getItem('cfHosts') || '';
+  try {
+    const d = await api('GET', '/api/status');
+    if (d.connected) setConnected(d.config);
+  } catch {}
+})();
+</script>
+</body>
+</html>
